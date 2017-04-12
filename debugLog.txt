@@ -1,0 +1,6 @@
+Debug file for terrainGenerator
+Wed Apr 12 16:48:41 2017
+init started
+generating mesh of detail:11
+detailLevel:11,step:1
+End of script
