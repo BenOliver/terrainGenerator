@@ -1,8 +1,10 @@
 import os
+import sys
 import bpy
 import bmesh
 import time
 import statistics
+import hashlib
 from math import *
 from mathutils import *
 from random import random
@@ -13,11 +15,32 @@ M=D.meshes
 O=D.objects
 
 
+def myHash(*args):
+	'''This function returns an 8 digit hex string
+	using the md5 digest of objects passed to it
+	it currently only supports ints,floats, and strings (or lists/tuples thereof)
+	'''
+	md5=hashlib.md5()
+	if len(args)==0:
+		#create random number if no arguments are passed
+		args=[random()*1000]
+	for entry in args:
+		if isinstance(entry,int) | isinstance(entry,float):
+			#turn number into binary format
+			a=bin(int(entry)).encode()
+			#md5 entries are concatenated together before digesting
+			md5.update(a)
+		elif isinstance(entry,str):
+			#turn string into binary format
+			a=entry.encode()
+			md5.update(a)
+	dig=md5.hexdigest()[:8]
+	return int(dig,16),dig
+		
+
 class Terrain:
-	'''a blender object which represents a landscape heightmap'''
-	global log
+	'''an object which represents a landscape heightmap and uses blender for model creation and rendering.'''
 	
-	Dbug=False  		#for debugging. value of 1 to print logs
 	def __init__(self, name,seed=None):
 		l('init started')
 		self.tesselate=True
@@ -27,23 +50,45 @@ class Terrain:
 		self.meshes={}
 		self.ob=None
 		self.detail=0
+		self.arrSize=1
+		self.roughness=1
+		self.roughFactor=1
+		
 		if seed is None:
 			#create random  hex string
-			seed=hex(hash(random())%(2**32))[2:] #remove the 0x prefix
+			_,seed=myHashhex()
+		
 		self.originalSeed=seed
-		self.worldSeed=hash(self.originalSeed)%(2**32)
-		self.worldSeedHex=hex(self.worldSeed)[2:] 
+		
+		#set a temporary worldSeed to enable fudgeOperator
+		self.worldSeed,_=myHash(seed)		
+		salt=self.fudge(1991,10,21)
+		
+		#create a new world seed using the fudge salt.
+		#this is to identify any map changes which will occur if the fudge function is altered.
+		self.worldSeed,self.worldSeedHex=myHash(salt,seed)		
+		
+		#write seeds to log file
+		l('-'*20,flush=False)
+		l('originalSeed:{}\nworldSeed:{}\nworldSeedHex:{}'.format(\
+		self.originalSeed,self.worldSeed,self.worldSeedHex),flush=False)
+		l('-'*20)
 	
 	def autoBuild(self,detail,painted=True):
+		#construct and link, heightmap, mesh and material
 		if isinstance(detail, tuple) | isinstance(detail,list) | isinstance(detail,range):
-			self.genMesh(detail=max(detail))
+			#create heightmap
+			self.genArray(detail=max(detail))
 			for det in detail:
+				#create the meshes of various detail
 				m=self.createMesh(det)
 				self.meshes[det]=m
+				#create material for each mesh
 				self.createMaterial(m,painted=painted)
 		else:
-			self.genMesh(detail=detail)
-			m=self.createMesh(detail=detail)
+			#if there is only one detail level given, do the same for single item.
+			self.genArray(detail=detail)
+			m=self.createMesh(detail=detail,xyScale=1,zAmp=1)
 			self.meshes[detail]=m
 			self.createMaterial(m,painted=painted)
 		self.ob=self.createObject(m)
@@ -51,13 +96,12 @@ class Terrain:
 	def createMesh(self,detail=1,xyScale=1,zAmp=1):
 
 		#create mesh name - this includes the seed and detail level to identify and re-use
-		meshName='_'.join([self.name,'Mesh',self.worldSeedHex,str(detail)])
+		meshName='_'.join([self.name,'Mesh',self.worldSeedHex,str(detail),str(xyScale),str(zAmp)])
 		#create new mesh
 		if meshName in M:
+			l('mesh {} already exists. reusing'.format(meshName))
 			return M[meshName]
-			#self.delMesh(meshName)
 		me=M.new(meshName)
-		#self.meshes[detail]=self.genMesh(me,terDetail=detail)
 		
 		#create bmesh
 		bm=bmesh.new()
@@ -71,41 +115,30 @@ class Terrain:
 		vt=[0]*(meshSize+1)
 		for i, item in enumerate(vt):
 			vt[i]=[0]*(meshSize+1)
-		
-#		vt[0][0]=0
-#		vt[0][-1]=0
-#		vt[-1][0]=0
-#		vt[-1][-1]=0
+
 		step=2**(self.detail-detail)
 		l('detailLevel:{},step:{}'.format(detail,step))
 		for I,i in enumerate(range(0,self.arrSize+1,step)):
 			for J,j in enumerate(range(0,self.arrSize+1,step)):
+				#iterate through x,y values and set the coordinates for the mexh
 				x=i*xyScale/self.arrSize
 				y=j*xyScale/self.arrSize
 				z=zAmp*self.array[i][j]*zAmp/self.arrSize
+				#create new vertices and map vertices to array vt
 				vt[I][J]=V.new((x,y,z))
 
 		for i in range(0,len(vt)-1):
 			for j in range(0, len(vt[i])-1):
 				#create the faces between the vertices
 				F.new((vt[i][j],vt[i+1][j],vt[i+1][j+1],vt[i][j+1]))
-		
+		#save the bmesh to the mesh
 		bm.to_mesh(me)
 		return me
-		
-		
-		
-		
-		
-		
-		return self.meshes[detail]
 	
 	def createObject(self,mesh,name=None):
 		if self.ob is None:
 			if name is None:
 				name=self.name
-			#print('1: {}'.format(name2))
-			#print('2:{}'.format(name3))
 			#cleanup older versions if they exist
 			self.delObject(name)
 			#create new object
@@ -122,51 +155,47 @@ class Terrain:
 		if name is None:
 			name=mesh.name+'_Mat'
 		if name in D.materials:
-			self.delMaterial(name)
-		mat=D.materials.new(name)
-		mesh.materials.append(mat)
-		mat.use_vertex_color_paint=1
-		mat.use_nodes=True
-		node=mat.node_tree.nodes.new('ShaderNodeAttribute')
-		node.attribute_name='Col'
-		diff=mat.node_tree.nodes['Diffuse BSDF']
-		self.assignColors(mesh,mat)
+			mat=D.materials[name]
+			l('FUNC:createMaterial(), creating new material called {}'.format(name))
+		else:
+			l('Creating new material')
+			mat=D.materials.new(name)
+			mat.use_vertex_color_paint=1
+			mat.use_nodes=True
+			node=mat.node_tree.nodes.new('ShaderNodeAttribute')
+			node.attribute_name='Col'
+			diff=mat.node_tree.nodes['Diffuse BSDF']
+			self.assignColors(mesh,mat)
+		if name not in mesh.materials:
+			mesh.materials.append(mat)
 		if painted:
-			mat.node_tree.links.new(node.outputs['Color'],diff.inputs['Color'])
+			mat.node_tree.links.new(mat.node_tree.nodes['Attribute']\
+			.outputs['Color'],mat.node_tree.nodes['Diffuse BSDF'].inputs['Color'])
 		return mat
 
-
-	def dprint(*args):
-		if Terrain.Dbug==True:
-			print(args)
-
-	def genMesh(self,roughness=1, roughFactor=1,detail=7):
+	def genArray(self,roughness=1, roughFactor=1,detail=7):
 		'''
 		this function creates an array for terrain generation.
 		best practice is to generate the highest detail required,
 		and then use that array to create less detailed meshes
 		'''
 		self.detail=detail
-		l('generating mesh of detail:{}'.format(self.detail))
+		l('FUNC:genArray(), detail:{}'.format(self.detail))
 		self.roughness=roughness      	#changes the baseline 'Roughess' TODO:change name
 		self.roughFactor=roughFactor 	#changes how strong the roughness is (sensitive-keep around 1.0)
 		self.arrSize=2**detail			#set level of detail. exponentially sensitive. 
-											#values greater than 2**7 take longer than 1 second to compute
+										#values greater than 2**7 take longer than 1 second to compute
 				
 		#create the square grid of arrSize x arrSize squares
 		v=[None]*(self.arrSize+1)
 		for i, item in enumerate(v):
 			v[i]=[None]*(self.arrSize+1)
-		#v=[[None]*(self.arrSize+1)]*(self.arrSize+1)
-
 			
 		#initialize initial corner vertices
 		v[0][0]=0
 		v[0][-1]=0
 		v[-1][0]=0
 		v[-1][-1]=0
-		
-
 		
 		r=int(self.arrSize/2)
 		numSquares=self.arrSize/(2*r)
@@ -196,27 +225,15 @@ class Terrain:
 					v[x][y]=self.square(v,x,y,r)
 			
 			r=int(r/2)
-		self.array=v
 		#end of mesh generation
-
-		
-					
+		self.array=v
+				
 	def assignColors(self,me,mat):
-		vColor=[]
-		maxZ=0
-		minZ=0
-		
 		#save z points to array, calculate max and min heights
-		for i in me.vertices:
-			z=i.co.z
-			if z>maxZ:
-				maxZ=z
-			if z<minZ:
-				minZ=z
-			vColor.append([0,i.co.z,0])
-		for i in vColor:
-			if (maxZ-minZ):
-				i[2]=i[2]/(maxZ-minZ)
+		zVals=[i.co.z for i in me.vertices]
+		maxZ=max(zVals)
+		minZ=min(zVals)
+		del(zVals)
 		
 		vertexColor=me.vertex_colors.new('Col').data
 		#vertexColor2=self.me.vertex_colors.new('Col2').data
@@ -225,9 +242,9 @@ class Terrain:
 		#TODO:convert the color scheme to hex codes
 		biomes={}
 		biomes['Water']={'startAlt':0,'endAlt':250,'rgb':Vector([0.004197,0,0.173])}
-		biomes['Sand']={'startAlt':240,'endAlt':400,'rgb':Vector([0.711,0.659,0.119])}
-		biomes['Grass']={'startAlt':300,'endAlt':600,'rgb':Vector([0,0.376,0])}
-		biomes['Stone']={'startAlt':500,'endAlt':850,'rgb':Vector([0.2,0.2,0.2])}
+		biomes['Sand']={'startAlt':240,'endAlt':300,'rgb':Vector([0.711,0.659,0.119])}
+		biomes['Grass']={'startAlt':300,'endAlt':700,'rgb':Vector([0,0.376,0])}
+		biomes['Stone']={'startAlt':650,'endAlt':850,'rgb':Vector([0.2,0.2,0.2])}
 		biomes['Snow']={'startAlt':800,'endAlt':1000,'rgb':Vector([0.8,0.8,0.8])}
 		
 		chartLen=1000
@@ -242,27 +259,20 @@ class Terrain:
 				else:
 					colorChart[i]=0.2*colorChart[i]+0.8*biome['rgb']
 						
-
-
-		i2=0
+		i2=0	#init index =0
 		for poly in me.polygons:
 			for idx in poly.loop_indices:
+				#paint all the vertices in loop
 				loop=me.loops[idx]
 				ver=me.vertices[loop.vertex_index]
 				[x,y,z]=ver.co
-				if (maxZ-minZ):
-					z=(z-minZ)/(maxZ-minZ)
+				if (maxZ-minZ):	#check if heightRange is non-0
+					z=(z-minZ)/(maxZ-minZ)	#scale the z coord between max and min
 				z=int(floor(z*chartLen)-1)
-				#print(z)
 				[r,g,b]=colorChart[z]
 				vertexColor[i2].color=[r,g,b]
-				#vertexColor2[i2].color=colorChart2[z]
 				i2+=1
-		#bpy.ops.object.mode_set(mode='VERTEX_PAINT)
 		
-
-
-
 	def delMesh(self,delTarget):
 		if delTarget in M:
 			#if the mesh exists, unlink and delete it
@@ -292,10 +302,9 @@ class Terrain:
 			prime3=10007
 			#use the primes and world seed (worldSeed) to generate a pseudo-random number based on the x and y coordinates.
 			#noiz is between 0 and 1.
-			#noiz=(((prime1*x*self.terrScale/self.arrSize+prime2*y*self.terrScale/self.arrSize+seed1)**seed2)%prime3)/prime3
 			noiz=(((prime1*x/self.arrSize+prime2*y/self.arrSize+seed1)**seed2)%prime3)/prime3
+			
 			return self.roughness*(r**self.roughFactor)*(noiz-0.5)
-			#the -0.5 balances the heighmap around the midplane
 		
 	def diamond(self,matrix, x, y, r):
 		''' 
@@ -344,6 +353,8 @@ class Terrain:
 			c=matrix[xPos][y]
 			d=matrix[x][yPos]
 		else:
+			xSeed=x
+			ySeed=y
 			xNeg=(x-r)
 			xPos=(x+r)
 			yNeg=(y-r)
@@ -374,33 +385,36 @@ class Terrain:
 				div=3			
 		v=(a+b+c+d)/div+self.fudge(xSeed,ySeed,r)
 		return v
-		
 
+def main():
 		
-if __name__ == '__main__':
-
-	logName='debugLog.txt'
-	lg=open(os.path.join(os.path.dirname(bpy.data.filepath),logName),'w+')
+	logName='debugLog.log'
+	lg=open(os.path.join(os.path.dirname(bpy.data.filepath),logName),'a+')
+	global l
 	def l(*args,flush=True):
-		'''function writes strings to the debug file
+		'''function writes strings to the debug log file
 		'''
 		for a in args:
 			lg.write('\n'+str(a))
 		if flush:
 			lg.flush()
 			
-	lg.write('Debug file for terrainGenerator')
+	lg.write('\n================================================='+\
+	'\nDebug file for terrainGenerator')
 	l(time.ctime())
-	for m in D.meshes:
-		m.user_clear()
-		D.meshes.remove(m)
+	if 1:
+	#clear old meshes and materials
+		for m in D.meshes:
+			m.user_clear()
+			D.meshes.remove(m)
+		for Mat in D.materials:
+			Mat.user_clear()
+			D.materials.remove(Mat)
 	
 
 	if 0:
 		det=9
 		ter=Terrain("test",seed="piningForTheFjords")
-		#for mesh in M:
-		#	ter.delMesh(mesh.name) # clear old meshes out
 		painted=True
 		ter.autoBuild(range(det),painted=painted)
 		S=bpy.data.scenes['Scene']
@@ -411,9 +425,15 @@ if __name__ == '__main__':
 			S.render.filepath='//renders'+p
 			bpy.ops.render.render(write_still=True)
 	else:
-		ter=Terrain("test",seed="piningForTheFjords")
-		ter.autoBuild(11)
+		ter=Terrain("test",seed='piningForTheFjords')
+		#ter.tesselate=False
+		ter.autoBuild(8)
 		
 
-	l('End of script')
+	l('End of script\n\n')
+	#close the log file
 	lg.close()
+
+if __name__ == '__main__':
+	main()
+		
