@@ -1,0 +1,3 @@
+*.log
+*.blend[0-9]
+scriptStub.py
