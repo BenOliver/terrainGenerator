@@ -1,4 +1,4 @@
-#Terrain Generator
+# Terrain Generator
 This script is for generating realistic looking heightmaps and creating blender meshes using blender's python interface.
 
 This is just a fun project of mine that I decided to upload to get to grips with using git. Most of this code is a few years old, and I'll try and update it when possible, but I'm not expecting it to see much use by others.
